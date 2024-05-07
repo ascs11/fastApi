@@ -1,11 +1,13 @@
+import random
 import signal
 from datetime import datetime
 import threading
+from typing import Counter
+import uuid
 import numpy as np
-from pythonosc import dispatcher, osc_server
+import requests
 from FE import FE  # Assuming FE is your feature extraction class
 from prediction import predic  # Assuming prediction is your prediction function
-import mysql.connector  # For database connection
 
 class EEGProcessor:
     def __init__(self, featureObj, predic, batch_size=30, buffer_size=100):
@@ -14,7 +16,9 @@ class EEGProcessor:
         self.predic = predic
         self.batch_size = batch_size
         self.buffer_size = buffer_size
-        self.last_prediction = None  # Variable to store the last prediction
+        self.last_prediction = None
+        self.prediction_history = []
+        
 
     def on_new_eeg_data(self, address: str, *args):
         """
@@ -36,6 +40,7 @@ class EEGProcessor:
         """
         Process the data in the buffer
         """
+        self.prediction_history = []
         data_batch = np.array(self.buffer[:self.batch_size])
         ret, feat_names = self.featureObj.generate_feature_vectors_from_samples(np.array(self.buffer), 150, 1., cols_to_ignore=-1)
         ret_2d = ret.reshape(1, -1)
@@ -43,78 +48,56 @@ class EEGProcessor:
 
         print("prediction:", prediction)
         self.last_prediction = prediction
+        print("Last Prediction:", self.last_prediction)
+        if self.last_prediction is not None:
+            self.prediction_history.append(self.last_prediction)
 
-        del self.buffer[:self.batch_size]
+        self.buffer = []
 
-    def insert_prediction_to_db(self, prediction):
+    def insert_most_common_prediction_to_db(self):
+        """
+        Insert the most common prediction into the eegsession table
+        """
+        most_common_prediction = None
+        if self.prediction_history:
+            prediction_counter = Counter(self.prediction_history)
+            most_common_prediction, _ = prediction_counter.most_common(1)[0]
+
+        if most_common_prediction is not None:
+            print("Calling insert_prediction_to_db with prediction:", most_common_prediction)
+            self.insert_prediction_to_db(most_common_prediction)
+
+    def insert_prediction_to_db(self, prediction,  patient_ID):
         """
         Insert the prediction into the eegsession table
         """
-        # Define your database connection details (replace with yours)
-        username = "root"
-        password = ""
-        hostname = "localhost"
-        database = "Sukoon"
 
-        connection = mysql.connector.connect(
-            user=username, password=password, host=hostname, database=database
-        )
-        cursor = connection.cursor()
+        print("Function Called")
 
+        
+        min_value = 100
+        max_value = 999
+        SessionID = random.randint(min_value, max_value)
         # Get current timestamp
         dateTimeObj = datetime.now()
         timestamp = dateTimeObj.strftime("%Y-%m-%d %H:%M:%S.%f")
+        
 
-        sql = "INSERT INTO eegsession (SessionID, HeadbandID, Duration, Result, Timestamp, patient_ID, doctor_ID) VALUES (%s, %s, %s, %s, %s, %s, %s)"
-        # Fill data based on your logic (replace with appropriate values)
-        data = (1, 1212, "hamza", prediction, timestamp, 1, 1212)  # Modify these values as needed
-        cursor.execute(sql, data)
+        urlSession = "https://infinite-wave-71025-404d3d4feff8.herokuapp.com/api/addSession"
+        data = {
+            "HeadbandID": 105,
+            "Duration": 30,
+            "Result": prediction,
+            "Timestamp": timestamp,
+            "patient_ID": patient_ID,
+            "doctor_ID": None
+        }
 
-        connection.commit()
-        cursor.close()
-        connection.close()
+        print("Request Body:", data)
+        response = requests.post(urlSession, json=data)
 
-def stop_server(signum, frame):
-    """
-    Signal handler for stopping the server
-    """
-    raise KeyboardInterrupt
-
-if __name__ == "__main__":
-    ip = "0.0.0.0"
-    port = 5000
-
-    # Initialize your featureObj and predic objects
-    featureObj = FE()
-    predic_obj = predic()
-
-    eeg_processor = EEGProcessor(featureObj, predic_obj)
-
-    dispatcher = dispatcher.Dispatcher()
-    dispatcher.map("/muse/eeg", eeg_processor.on_new_eeg_data)
-
-    server = osc_server.ThreadingOSCUDPServer((ip, port), dispatcher)
-    print("Listening on UDP port " + str(port))
-
-    # Set a timeout for 30 seconds
-    signal.signal(signal.SIGALRM, stop_server)
-    signal.alarm(30)
-
-    try:
-        server_thread = threading.Thread(target=server.serve_forever)
-        server_thread.start()
-        server_thread.join()
-    except KeyboardInterrupt:
-        pass
-    except:
-        pass
-    finally:
-        signal.alarm(0)  # Disable the alarm
-
-        server.server_close()
-
-        # Insert last prediction into the database
-        if eeg_processor.last_prediction is not None:
-            eeg_processor.insert_prediction_to_db(eeg_processor.last_prediction)
-
-    print("Script finished running")
+        print("Status Code:", response.status_code)
+        if response.status_code == 200:
+            print("Data inserted successfully")
+        else:
+            print("Data Error:", response.text)
